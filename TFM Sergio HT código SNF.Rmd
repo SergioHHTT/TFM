@@ -1,0 +1,335 @@
+---
+title: "TFM SNF Sergio HT"
+author: "Sergio HT"
+date: "`r Sys.Date()`"
+output:
+  word_document: default
+  pdf_document: default
+---
+
+Based on the work of Wang et al. 2014.\
+and\
+Morgane Térézol, Galadriel Brière & Samuel Chaffron. Mars 22, 2024
+
+```{r setup, include=FALSE}
+```
+
+```{r Librerias_de_datos, message=FALSE, warning=FALSE}
+library("MOFAdata")
+library("data.table")
+library("mixOmics")
+```
+
+```{r Librerias_de_analisis , message=FALSE, warning=FALSE}
+if (!require("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+library("SNFtool")
+library("pheatmap")
+library("igraph")
+library("cluster")
+library("RColorBrewer")
+library("uwot")
+library("Biobase") 
+library("matrixStats")
+library("impute")
+```
+
+```{r Carga_de_datos}
+data(datax)
+```
+
+```{r Evaluar_datos_y_dimensiones}
+names(datax$data.train)
+lapply(datax$data.train, dim)
+```
+
+```{r Separar_por_ómica}
+datax_omica1 = datax$data.train$omica1
+datax_omica2 = datax$data.train$omica2
+datax_omica3 = datax$data.train$omica3
+```
+
+```{r Comparar_y_unificar}
+id_datax_omica1 <- rownames(datax_omica1)  
+id_datax_omica2  <- rownames(datax_omica2)
+id_datax_omica3  <- rownames(datax_omica3)  
+
+id_comun <- Reduce(intersect, list(id_datax_omica1, id_datax_omica2,id_datax_omica3))
+length(id_comun)                     
+
+datax_omica1  <- datax_omica1[id_comun, ]
+datax_omica2  <- datax_omica2[id_comun, ]
+datax_omica3  <- datax_omica3[id_comun, ]
+```
+
+```{r}
+datax_omica1[c(1:5), c(1:5)]
+datax_omica2[c(1:5), c(1:5)]
+datax_omica3[c(1:5), c(1:5)]
+```
+
+```{r Extraer_Metadatos}
+datax_metadata = datax$data.train$subtype
+head(datax_metadata)
+```
+
+```{r}
+summary(datax_metadata)
+```
+
+```{r Dataframe_metadatos}
+datax_metadata_df <- data.frame("subtype" = datax_metadata)
+row.names(datax_metadata_df) <- row.names(datax_omica1)
+head(datax_metadata_df)
+```
+
+```{r Eliminar_outliers}
+med_data1<-rowMedians(datax_omica1, na.rm = TRUE)
+mad_data1<-rowMads(datax_omica1, na.rm = TRUE)
+zmat_data1 <- sweep(datax_omica1, 1, med_data1, "-") / mad_data1
+datax_omica1[abs(zmat_data1) > 5] <- NA
+
+med_data2<-rowMedians(datax_omica2, na.rm = TRUE)
+mad_data2<-rowMads(datax_omica2, na.rm = TRUE)
+zmat_data2 <- sweep(datax_omica2, 1, med_data2, "-") / mad_data2
+datax_omica2[abs(zmat_data2) > 5] <- NA
+
+med_data3<-rowMedians(datax_omica3, na.rm = TRUE)
+mad_data3<-rowMads(datax_omica3, na.rm = TRUE)
+zmat_data3 <- sweep(datax_omica3, 1, med_data3, "-") / mad_data3
+datax_omica3[abs(zmat_data3) > 5] <- NA
+```
+
+```{r Comprobar_NA}
+table(is.na(datax_omica1))
+table(is.na(datax_omica2))
+table(is.na(datax_omica3))
+```
+
+```{r Imputación_NA}
+imputed_data1 <- impute.knn(as.matrix(datax_omica1), k = 10, rowmax = 0.5, colmax = 0.8)
+datax_omica1   <- imputed_data1$data
+
+imputed_data2 <- impute.knn(as.matrix(datax_omica2), k = 10, rowmax = 0.5, colmax = 0.8)
+datax_omica2   <- imputed_data2$data
+
+imputed_data3 <- impute.knn(as.matrix(datax_omica3), k = 10, rowmax = 0.5, colmax = 0.8)
+datax_omica3   <- imputed_data3$data
+```
+
+```{r Eliminar_NA}
+NARemoving <- function(data, margin, threshold){
+    #' Eliminar los datos faltantes (NA):
+    #'
+    #' Calcula el porcentage de NA
+    #' Eliminar NA de las filas (margin = 1) o columnas (margin = 2)
+    #' 
+    #' @param data data.frame
+    #' @param margin int. 1 = fila and 2 = columna
+    #' @param threshold int. Porcentaje de datos faltantes aceptados
+    #'  
+    #' @return Return data.frame con un porcentaje específico de na por fila o columna
+    # Calcula el porcentaje de NA 
+  data_na <- apply(data, MARGIN = margin, FUN = function(v){sum(is.na(v)) / length(v) * 100})
+  print(table(data_na))
+  
+  toRemove <- split(names(data_na[data_na > threshold]), " ")[[1]]
+  if(margin == 1){
+    data_withoutNa <- data[!(row.names(data) %in% toRemove),]
+    print(paste0("Remove ", as.character(length(toRemove)), " samples."))
+  }
+  if(margin == 2){
+    data_withoutNa <- data[,!(colnames(data) %in% toRemove)]
+    print(paste0("Remove ", as.character(length(toRemove)), " features"))
+  }
+  return(data_withoutNa)
+}
+```
+
+```{r Normalizar_cada_ómica}
+datax_omica1_scaled <- standardNormalization(x = datax_omica1)
+datax_omica2_scaled <- standardNormalization(x = datax_omica2)
+datax_omica3_scaled <- standardNormalization(x = datax_omica3)
+```
+
+```{r Comprobar_Normalización}
+par(mfrow = c(3, 2))
+hist(datax_omica1, nclass = 100, main = "datax_omica1 - 
+     Distribución de los datos antes de normalizar", xlab = "values")
+hist(datax_omica1_scaled, nclass = 100, main = "datax_omica1 - 
+     Distribución de los datos después de normalizar", xlab = "scaled values")
+hist(datax_omica2, nclass = 100, main = "datax_omica2 - 
+     Distribución de los datos antes de normalizar", xlab = "values")
+hist(datax_omica2_scaled, nclass = 100, main = "datax_omica2 - 
+     Distribución de los datos después de normalizar", xlab = "scaled values")
+hist(datax_omica3, nclass = 100, main = "datax_omica3 - 
+     Distribución de los datos antes de normalizar", xlab = "values")
+hist(datax_omica3_scaled, nclass = 100, main = "datax_omica3 - 
+     Distribución de los datos después de normalizar", xlab = "scaled values")
+par(mfrow = c(1, 1))
+```
+
+```{r Cálculo_de_Distancia}
+datax_omica1_dist <- dist2(datax_omica1_scaled, datax_omica1_scaled)
+datax_omica2_dist <- dist2(datax_omica2_scaled, datax_omica2_scaled)
+datax_omica3_dist <- dist2(datax_omica3_scaled, datax_omica3_scaled)
+```
+
+```{r Parametros_SNF}}
+K <- 20         # Rango habitual 10-30
+sigma <- 0.5    # Rango habitual 0.3-0.8
+T = 10          # 10 iteraciones
+```
+
+```{r Calculo_Similitud}
+datax_omica1_W <- affinityMatrix(datax_omica1_dist, K, sigma)
+datax_omica2_W <- affinityMatrix(datax_omica2_dist, K, sigma)
+datax_omica3_W <- affinityMatrix(datax_omica3_dist, K, sigma)
+```
+
+```{r}
+displayClusters(datax_omica1_W,datax_metadata)
+displayClusters(datax_omica2_W,datax_metadata)
+displayClusters(datax_omica3_W,datax_metadata)
+```
+
+```{r Heatmap_Similitud}
+pheatmap(log(datax_omica1_W, 10), show_rownames = FALSE, show_colnames = FALSE, annotation = datax_metadata_df, main = "datax omica1 data")
+pheatmap(log(datax_omica2_W, 10), show_rownames = FALSE, show_colnames = FALSE, annotation = datax_metadata_df, main = "datax omica2 data")
+pheatmap(log(datax_omica3_W, 10), show_rownames = FALSE, show_colnames = FALSE, annotation = datax_metadata_df, main = "datax omica3 data")
+```
+
+```{r Fusion_matrices_Similitud}
+datax_W <- SNF(list(datax_omica1_W, datax_omica2_W, datax_omica3_W), K, T)
+datax_W[c(1:5), c(1:5)]
+```
+
+```{r}
+length(datax_W)
+table(datax_W == 0)
+```
+
+```{r Heatmap_Similitud_Fusionada}
+pheatmap(log(datax_W, 10), show_rownames = FALSE, show_colnames = FALSE, annotation = datax_metadata_df, main = "datax - Fused similarity matrix W")
+```
+
+```{r Calculo_clusters_metadatos}
+num_clusters<- 2:8                      
+vec_clusters   <- numeric(length(num_clusters))
+
+for (i in seq_along(num_clusters)) {
+  clust<- spectralClustering(datax_W, num_clusters[i])
+  vec_clusters[i] <- calNMI(clust, datax_metadata)
+}
+
+best_cluster<- num_clusters[ which.max(vec_clusters)]
+group <- spectralClustering(datax_W, best_cluster)
+
+```
+
+```{r}
+best_cluster
+calNMI(clust, datax_metadata)
+displayClusters(datax_W, group)
+```
+
+```{r Calculo_clusters_eigen}
+estimateNumberOfClustersGivenGraph(datax_W, NUMC=2:10)
+```
+
+```{r Calculo_clusters_silhouette}
+num_clusters2 <- 2:8
+vec_sil <- numeric(length(num_clusters2))
+
+distW <- as.dist(1 - datax_W / max(datax_W))
+
+for (i in seq_along(num_clusters2)) {
+  clust2   <- spectralClustering(datax_W, num_clusters2[i])
+  sil  <- silhouette(clust2, distW)
+  vec_sil[i] <- mean(sil[, "sil_width"])
+}
+
+best_cluster2 <- num_clusters[ which.max(vec_sil) ]
+group2 <- spectralClustering(datax_W, best_cluster2)
+```
+
+```{r Matriz_concordancia}
+ConcordanceMatrix <- concordanceNetworkNMI(list(datax_W,datax_omica1_W,datax_omica2_W,datax_omica3_W),best_cluster)
+print(ConcordanceMatrix)
+```
+
+```{r}
+datax_W_net <- graph_from_adjacency_matrix(datax_W, weighted = TRUE, mode = "upper", diag = FALSE)
+```
+
+```{r Distribucion_weights}
+par(mfrow = c(1, 2))
+datax_weights <- edge.attributes(datax_W_net)$weight
+hist(datax_weights, nclass = 100, main = "Fused network weight distribution", xlab = "weights")
+hist(log(datax_weights, 10), nclass = 100, main = "Fused network weight distribution", xlab = "weights")
+abline(v = log(0.0039, 10), col = "cyan", lwd = 3)
+par(mfrow = c(1, 1))
+```
+
+```{r Umbral_mean}
+datax_W_median <- median(x = datax_weights)
+datax_W_median
+length(datax_weights[datax_weights >= datax_W_median])
+```
+
+```{r Umbral_0.75}
+datax_W_q75 <- quantile(x = datax_weights, 0.75)
+datax_W_q75
+length(datax_weights[datax_weights >= datax_W_q75])
+```
+
+```{r}
+hist(log(datax_weights, 10), nclass = 100, main = "Fused network weight distribution", xlab = "log10(weights)")
+abline(v = log(datax_W_median, 10), col = "blue", lwd = 3)
+text(log(datax_W_median, 10), 160, pos = 2, "Median", col = "blue", cex = 1)
+abline(v = log(datax_W_q75, 10), col = "purple", lwd = 3)
+text(log(datax_W_q75, 10), 160, pos = 4, "quantile 75%", col = "purple", cex = 1)
+```
+
+```{r Red_umbral_X}
+threshold_mode   <- "absolute"  # "quantile"  |  "absolute"
+threshold_q      <- 0.0         #  para cuantil
+threshold_value  <- 0.00        # para valor absoluto
+
+W_plot <- datax_W
+
+if (threshold_mode == "quantile") {threshold_value <- as.numeric(quantile(W_plot, threshold_q, na.rm = TRUE))}
+W_plot[W_plot < threshold_value] <- 0
+
+g <- graph_from_adjacency_matrix(W_plot,mode = "upper",weighted = TRUE, diag = FALSE)
+
+
+V(g)$cluster <- factor(datax_metadata) 
+#V(g)$cluster <- factor(group2) [en caso de utilizar silhouette]
+V(g)$name    <- rownames(tcga_W)         
+pal          <- brewer.pal(length(levels(V(g)$cluster)), "Set1")
+V(g)$color   <- pal[as.numeric(V(g)$cluster)]
+E(g)$width   <- E(g)$weight * 3          
+
+
+plot(
+  g,
+  vertex.size   = 6,
+  vertex.label  = NA,
+  edge.width    = E(g)$width,
+  layout        = layout_with_fr(g)
+)
+
+legend(
+  "bottomleft",
+ 
+  legend = levels(factor(tcga_metadata)), 
+  #legend = paste("Cluster", levels(V(g)$cluster)) [en caso de utilizar silhouette]
+  col    = pal,
+  pch    = 19,
+  pt.cex = 1.5,
+  bty    = "n",
+  title  = paste0("Titulo red de similitud")
+)
+
+```
