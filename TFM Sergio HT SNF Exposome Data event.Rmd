@@ -1,0 +1,341 @@
+---
+title: "TFM Sergio HT SNF Exposome Data event"
+author: "Sergio HT"
+date: "`r Sys.Date()`"
+output:
+  word_document: default
+  pdf_document: default
+---
+
+```{r setup_global, include=FALSE}
+knitr::opts_chunk$set(
+  echo = FALSE,
+  results = "markup",
+  message = FALSE,
+  warning = FALSE
+)
+```
+
+```{r Librerias_de_analisis , message=FALSE, warning=FALSE}
+if (!require("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+library("SNFtool")
+library("pheatmap")
+library("igraph")
+library("cluster")
+library("RColorBrewer")
+library("uwot")
+library("Biobase") 
+library("matrixStats")
+library("impute")
+```
+
+# SNF Exposome data challenge event
+
+Este estudio esta centrado en dos de las ómicas principales que se describen en el proyecto, proteómica y metabolómica de suero.
+
+Cargar los datos.
+
+```{r Carga_de_datos}
+load("ExposomeChallengeStartingPoint.RData")
+proteoData <- exprs(proteome)
+metabData <- as.matrix(exprs(metabol_serum))
+phenotype<-phenotype[,-1]
+```
+
+Comprobar las dimensiones.\
+Para SNF se deben tener el mismo número de pacientes para las diferentes ómicas por lo que se deben conservar solo los pacientes que están en ambos datasets.
+
+```{r Dimension}
+dim(metabData)
+dim(proteoData)
+```
+
+Comparary comprobarque las diferencias entre ambos Datasets no afectan de manera significativa a la cantidad de los datos.
+
+```{r Comparar_y_unificar}
+id_metab <- colnames(metabData)  
+id_prot  <- colnames(proteoData)      
+
+id_comun <- intersect(id_prot, id_metab)
+length(id_comun)                     
+```
+
+Unificar ambos datasets con las mismas muestras y comprobar que ahora tengan la misma dimensión.
+
+```{r Recortar_omicas}
+proteoData   <- proteoData[,   id_comun]
+metabData  <- metabData[,  id_comun]
+dim(metabData)
+dim(proteoData)
+```
+
+Y que estén ordenados correctamente.
+
+```{r Orden}
+metabData[c(1:5), c(1:5)]
+proteoData[c(1:5), c(1:5)]
+```
+
+Se aplica el mismo método con los metadatos: comprobr las dimensiones, conservar solo las muestras que estén representadas en ambas ómicas y comprobar que se obtienen el mismo número de muestras que en las ómicas.
+
+```{r Dimension_metadatos}
+dim(phenotype)
+```
+
+```{r Extraer_Metadatos_omicas}
+phenotype <- phenotype[id_comun, ]
+dim(phenotype)
+```
+
+Nombres de las variables de metadatos
+
+```{r grupos_metadatos}
+names(phenotype)
+```
+
+Eliminación de Outliers
+
+```{r Eliminacion_de_Outliers}
+med_prot <- rowMedians(proteoData, na.rm = TRUE)
+mad_prot <- rowMads(proteoData, na.rm = TRUE)
+
+zmat_prot <- sweep(proteoData, 1, med_prot, "-") / mad_prot
+proteoData[abs(zmat_prot) > 5] <- NA
+
+                  
+
+med_met <- rowMedians(metabData, na.rm = TRUE)
+mad_met <- rowMads(metabData, na.rm = TRUE)
+ 
+zmat_met <- sweep(metabData, 1, med_met, "-") / mad_met
+metabData[abs(zmat_met) > 5] <- NA
+
+```
+
+Comprobar que la eliminación de valores atípicos (sobre un 10% se considera el umbral aceptable para imputar datos)
+
+```{r Comprobar_NA}
+table(is.na(metabData))
+table(is.na(proteoData))
+table(is.na(phenotype))
+```
+
+Inputar los datos faltantes mediante el método de KNN. Se escogen 10 vecinos para realizar la inputación.
+
+```{r Imputar_KNN}
+imputed_prot <- impute.knn(as.matrix(proteoData), k = 10, rowmax = 0.5, colmax = 0.8)
+proteoData   <- imputed_prot$data
+
+imputed_met <- impute.knn(as.matrix(metabData), k = 10, rowmax = 0.5, colmax = 0.8)
+metabData   <- imputed_met$data
+```
+
+Comprobar que no existen valores faltantes en lasmatrices de datos ómicos (necesario para SNF).
+
+```{r Comprobar_NA}
+table(is.na(metabData))
+table(is.na(proteoData))
+```
+
+Normalizar las matrices y en este caso particular transpondremos las las columnas y las filas para tener las muestras/pacientes en las filas como se necesita en SNF.
+
+```{r Normalizar_cada_omica}
+proteoData_scaled <- t(standardNormalization(x = proteoData))
+metabData_scaled <- t(standardNormalization(x = metabData))
+```
+
+Comprobar normalización mediante histogramas
+
+```{r Comprobar_Normalizacion}
+par(mfrow = c(2, 2))
+hist(proteoData, nclass = 100, main = "proteoData - 
+     Distribución de los datos 
+     antes de normalizar", xlab = "values")
+hist(proteoData_scaled, nclass = 100, main = "proteoData_scaled - 
+     Distribución de los datos 
+     después de normalizar", xlab = "scaled values")
+hist(metabData, nclass = 100, main = "metabData - 
+     Distribución de los datos 
+     antes de normalizar", xlab = "values")
+hist(metabData_scaled, nclass = 100, main = "metabData_scaled - 
+     Distribución de los datos 
+     después de normalizar", xlab = "scaled values")
+par(mfrow = c(1, 1))
+```
+
+Calcular la distancia mediante distancias euclideas
+
+```{r Calculo_de_Distancia}
+proteoData_dist <- dist2(proteoData_scaled, proteoData_scaled)
+metabData_dist <- dist2(metabData_scaled, metabData_scaled)
+```
+
+Escoger los parámetros
+
+K: Rango habitual es 10-30
+
+K=n/C (siendo C el número de clústeres esperado) o K=n/10
+
+K=n/10 = 1152/10 = 115.
+
+Sigma: Rango habitual 0.3-0.8.
+
+T: 10 iteraciones
+
+```{r Parametros_SNF}}
+K <- 115  
+sigma <- 0.8   
+T = 10        
+```
+
+Calcular la similitud
+
+```{r Calculo_Similitud}
+proteoData_W <- affinityMatrix(proteoData_dist, K, sigma)
+metabData_W <- affinityMatrix(metabData_dist, K, sigma)
+```
+
+Representar las redes de similitud de las ómicas con los heatmaps
+
+```{r Heatmap_Similitud}
+pheatmap(log(proteoData_W, 10), show_rownames = FALSE, show_colnames = FALSE, main = "ProteoData")
+pheatmap(log(metabData_W, 10), show_rownames = FALSE, show_colnames = FALSE, main = "metabData")
+```
+
+Fusionar las matrices de similitud.
+
+```{r Fusion_matrices_Similitud}
+exposome_W <- SNF(list(proteoData_W, metabData_W), K, T)
+exposome_W[c(1:5), c(1:5)]
+```
+
+Comprobar dimensión y NA
+
+```{r dimension_de_la_matriz_fusionada}
+length(exposome_W)
+table(exposome_W == 0)
+```
+
+```{r estimar_clusteres}
+estimateNumberOfClustersGivenGraph(exposome_W, NUMC=2:10)
+```
+
+```{r Calculo_clusters_silhouette}
+num_clusters2 <- 2:10
+vec_sil <- numeric(length(num_clusters2))
+
+distW <- as.dist(1 - exposome_W / max(exposome_W))
+
+for (i in seq_along(num_clusters2)) {
+  clust2   <- spectralClustering(exposome_W, num_clusters2[i])
+  sil  <- silhouette(clust2, distW)
+  vec_sil[i] <- mean(sil[, "sil_width"])
+}
+
+best_cluster2 <- num_clusters2[ which.max(vec_sil) ]
+group2 <- spectralClustering(exposome_W, best_cluster2)
+best_cluster2
+```
+
+Representar el heatmap de la red fusionada.
+
+```{r Heatmap_Similitud_Fusionada}
+pheatmap(log(exposome_W,10), show_rownames = FALSE, show_colnames = FALSE, main = "exposome_W - Fused similarity matrix W")
+```
+
+Comprobar la concordancia entre la matriz fusionada y las matrices individuales
+
+```{r Matriz_concordancia}
+ConcordanceMatrix <- concordanceNetworkNMI(list(exposome_W,proteoData_W,metabData_W),best_cluster2)
+print(ConcordanceMatrix)
+```
+
+Gráficar la distribución de los pesos.
+
+```{r}
+exposome_W_net <- graph_from_adjacency_matrix(exposome_W, weighted = TRUE, mode = "upper", diag = FALSE)
+```
+
+```{r Distribucion_weights}
+par(mfrow = c(1, 2))
+exposome_weights <- edge.attributes(exposome_W_net)$weight
+hist(exposome_weights, nclass = 100, main = "Fused network 
+     weight distribution", xlab = "weights")
+hist(log(exposome_weights, 10), nclass = 100, main = "Fused network 
+     weight distribution", xlab = "weights")
+par(mfrow = c(1, 1))
+```
+
+Comprobar la mean de la distribución
+
+```{r Umbral_mean}
+exposome_W_median <- median(x = exposome_weights)
+exposome_W_median
+length(exposome_weights[exposome_weights >= exposome_W_median])
+```
+
+Comprobar el 75% de la distribución
+
+```{r Umbral_0.75}
+exposome_W_q75 <- quantile(x = exposome_weights, 0.75)
+exposome_W_q75
+length(exposome_weights[exposome_weights >= exposome_W_q75])
+```
+
+Representar los umbrales en histograma
+
+```{r}
+hist(log(exposome_weights, 10), nclass = 100, main = "Fused network weight distribution", xlab = "log10(weights)")
+abline(v = log(exposome_W_median, 10), col = "blue", lwd = 3)
+text(log(exposome_W_median, 10), 160, pos = 2, "Median", col = "blue", cex = 1)
+abline(v = log(exposome_W_q75, 10), col = "purple", lwd = 3)
+text(log(exposome_W_q75, 10), 160, pos = 4, "quantile 75%", col = "purple", cex = 1)
+```
+
+Representación visual de la red de fusion mediante nodos y aristas.
+
+```{r Red_umbral_0.99}
+
+W_plot <-exposome_W
+diag(W_plot)<-0
+threshold_mode   <- "quantile"  # "quantile"  |  "absolute"
+threshold_q      <- 0.99        #  para cuantil
+threshold_value  <- 0.00        # para valor absoluto
+
+
+
+if (threshold_mode == "quantile") {threshold_value <- as.numeric(quantile(W_plot, threshold_q, na.rm = TRUE))}
+W_plot[W_plot < threshold_value] <- 0
+
+
+g <- graph_from_adjacency_matrix(W_plot,mode = "upper",weighted = TRUE, diag = FALSE)
+
+
+V(g)$cluster <- factor(group2)
+V(g)$name    <- rownames(exposome_W)         
+pal          <- brewer.pal(length(levels(V(g)$cluster)), "Set1")
+V(g)$color   <- pal[as.numeric(V(g)$cluster)]
+E(g)$width   <- E(g)$weight * 3          
+
+
+plot(
+  g,
+  vertex.size   = 6,
+  vertex.label  = NA,
+  edge.width    = E(g)$width,
+  layout        = layout_with_kk(g)
+)
+
+legend(
+  "bottomleft",
+ 
+  legend = paste("Cluster", levels(V(g)$cluster)),
+  col    = pal,
+  pch    = 19,
+  pt.cex = 1.5,
+  bty    = "n",
+  title  = paste0("SNF exposome")
+)
+
+```
